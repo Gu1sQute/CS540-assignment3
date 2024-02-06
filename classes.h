@@ -74,7 +74,25 @@ public:
 
     // Read csv file and add records to the index
     void createFromFile(string csvFName) {
-        
+        fstream fin;
+        fin.open(csvFName,ios::in);
+        if (!fin.is_open()) {
+            cerr << "Couldn't read file: " << csvFName << "\n";
+            return ;
+        }
+        string lineinfile;
+        while (getline(fin,lineinfile)) {
+            string sttrinfile;
+            vector<string> attrvec;
+            stringstream stringline(lineinfile);
+            while(getline(stringline,sttrinfile,',')) {
+                attrvec.push_back(sttrinfile);
+            }
+            Record somerecord(attrvec);
+            insertRecord(somerecord);
+            // break;
+
+        }
     }
 
     // Given an ID, find the relevant record and print it
