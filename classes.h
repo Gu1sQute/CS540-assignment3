@@ -281,8 +281,8 @@ private:
         int idbucket = HashIdInBucket(record.id);
         cout<<"idbucket: "<<idbucket<<endl;
         if (idbucket >= n) {
-            cout<<"flipbit occur! idbucket after flip bit: "<<idbucket<<endl;
             idbucket = flipbit(idbucket);
+            cout<<"flipbit occur! idbucket after flip bit: "<<idbucket<<endl;
         }
 
 
@@ -301,7 +301,7 @@ private:
                 Writefile(IndexPagePtr,page);
                 bucketfound = true;
                 numRecords++;
-                cout<<"Find bucket! inserted "<<record.id<<endl;
+                cout<<"Find bucket in: "<<Pindex.numbucket<<" inserted "<<record.id<<endl;
                 break;
             }
             nextptr+=sizeof(Pageindex);
@@ -405,7 +405,7 @@ public:
             Record somerecord(attrvec);
             insertRecord(somerecord);
             dataset++;
-            if (dataset == 40) {
+            if (dataset == 50) {
                 break;
             }
 
@@ -416,7 +416,56 @@ public:
     Record findRecordById(int id) {
         vector<string> deflt = {"0","","","0"};
         Record foundrecord = deflt;
-        Readfile(0,page);
+        Pageindex index;
+        vector<char> init(BLOCK_SIZE);
+        page = init;
+        init.clear();
+        
+        int bucket = HashIdInBucket(id);
+        if (bucket >= n) {
+            bucket = flipbit(bucket);
+            cout<<"flipbit occur! idbucket after flip bit: "<<bucket<<endl;
+            }
+        Readfile(IndexPagePtr,page);
+        nextptr = 0;
+        for (int k = 0; k < numIndex; k++) {
+            memcpy(&index,&page[nextptr],sizeof(Pageindex));
+            if(index.numbucket == bucket) {
+                vector<char> searchPage(BLOCK_SIZE);
+                Readfile(index.pageptr,searchPage);
+                int NumEntries = *reinterpret_cast<int*>(&searchPage[NumEntriesPos]); // find how many entries in the page
+                for(int t = 1; t <= NumEntries; t++) {
+                    int searchslotptr = NumEntriesPos - sizeof(int) * 2 * t; // start index of every records
+                    int nextfree = *reinterpret_cast<int *>(&searchPage[searchslotptr]); // find where's records start
+                    long long int foundid = *reinterpret_cast<long long int*>(&searchPage[nextfree]);
+                    if (id == (int)foundid) {
+                        foundrecord.id = foundid;
+                        nextfree += sizeof(foundrecord.id) + 1;
+                        string name;
+                        while(searchPage[nextfree]!= ',') {
+                            name += searchPage[nextfree];
+                            nextfree++;
+                        }
+                        foundrecord.name = name;
+                        nextfree++;
+                        string bio;
+                        while(searchPage[nextfree]!= ',') {
+                            bio += searchPage[nextfree];
+                            nextfree++;
+                        }
+                        foundrecord.bio = bio;
+                        nextfree++;
+                        foundrecord.manager_id = *reinterpret_cast<long long int*>(&searchPage[nextfree]);
+                        cout<<"ID found!"<<endl;
+                        foundrecord.print();
+                        return foundrecord;
+                    }
+                }
+            }
+            nextptr += sizeof(Pageindex);
+        }
+        cout<<"BAD ID!"<<endl;
+        foundrecord.print();
         return foundrecord;
     }
 };
