@@ -16,10 +16,9 @@ struct Pageindex {
     int numbucket;
     int pageptr;
     int indexptr;
-    char resvd[1];
+    char resvd[2];
     bool fullbit;
     bool oflpagebit;
-    bool validbit;
 };
 class Record {
 public:
@@ -100,7 +99,6 @@ private:
         }
         newindex.numbucket = numbucket;
         newindex.pageptr = nextFreeBlock;
-        newindex.validbit = true;
         newindex.indexptr = indexptr;
         memcpy(&page[indexptr],&newindex,sizeof(Pageindex));
         Writefile(IndexPagePtr,page);
@@ -139,7 +137,6 @@ private:
         int nextfree = *reinterpret_cast<int *>(&bucketpage[FreeSpacePos]);
         int start_record_ptr = nextfree;
         int NumEntries = *reinterpret_cast<int *>(&bucketpage[NumEntriesPos]);
-        // cout<<"NumEntries: "<<NumEntries<<endl;
         
         memcpy(&bucketpage[nextfree], &record.id, sizeof(record.id));
         nextfree += sizeof(record.id);
@@ -236,12 +233,6 @@ private:
 
                 tempRecordDst.push_back(tmpRecord);
 
-                // if (HashIdInBucket(static_cast<int>(tmpRecord.id)) == numbucket) { // If it's flip bit records
-                //     tempRecordDst.push_back(tmpRecord);
-                // }
-                // else {
-                //     tempRecordOrg.push_back(tmpRecord);
-                // }
             }
             numRecords -= NumEntries;
             fill(searchPage.begin(),searchPage.end(),0);
@@ -254,10 +245,8 @@ private:
         // now we reinsert the records
         if(!tempRecordDst.empty()) {
             for (auto& record:tempRecordDst) {
-                cout<<"Rehashing these records: "<<record.id<<endl;
                 insertRecord(record);
             }
-            cout<<"Rehashing complete."<<endl;
         }
 
 
@@ -265,7 +254,6 @@ private:
 
     // Insert new record into index
     void insertRecord(Record record) {
-        cout<<"Inserting Record: "<<record.id<<endl;
 
         bool bucketfound = false;
 
@@ -279,14 +267,9 @@ private:
 
         // Find bucket to insert
         int idbucket = HashIdInBucket(record.id);
-        cout<<"idbucket: "<<idbucket<<endl;
         if (idbucket >= n) {
             idbucket = flipbit(idbucket);
-            cout<<"flipbit occur! idbucket after flip bit: "<<idbucket<<endl;
         }
-
-
-        // cout<<"numIndex: "<<numIndex<<endl;
 
         // Add record to the index in the correct block, creating a overflow block if necessary
         // First, find index from index page
@@ -301,7 +284,6 @@ private:
                 Writefile(IndexPagePtr,page);
                 bucketfound = true;
                 numRecords++;
-                cout<<"Find bucket in: "<<Pindex.numbucket<<" inserted "<<record.id<<endl;
                 break;
             }
             nextptr+=sizeof(Pageindex);
@@ -312,7 +294,6 @@ private:
 		// increase n; increase i (if necessary); place records in the new bucket that may have been originally misplaced due to a bit flip
         // Overflow page if bucket is full for idbucket
         if (!bucketfound) {
-            cout<<"overflow page occur!! Add overflow page!"<<endl;
             Pageindex newindex = AddPage(idbucket,indexend,true);
             // Write the record in file
             WritePage(record,newindex);
@@ -324,7 +305,6 @@ private:
             numRecords++;
         }
         if (CheckBucket()) {
-            cout<<"Exceed current bucket capacity, creat new bucket!\n"<<endl;
             Pageindex newindex = AddPage(n,indexend,false);
             // First rehash then increase the numIndex
             numIndex++;
@@ -366,7 +346,6 @@ public:
             Pindex.pageptr = BLOCK_SIZE * k;
             Pindex.numbucket = indexofbucket;
             Pindex.indexptr = nextptr;
-            Pindex.validbit = 1;
             memcpy(&page[nextptr],&Pindex,sizeof(Pageindex));
             indexofbucket++;
             numIndex++;
@@ -381,7 +360,6 @@ public:
             nextFreeBlock += BLOCK_SIZE;
             fin.write(page.data(),BLOCK_SIZE);
         }
-        // cout<<"nextFreeBlock: "<<nextFreeBlock<<endl;
         fin.close();
     }
 
@@ -405,9 +383,6 @@ public:
             Record somerecord(attrvec);
             insertRecord(somerecord);
             dataset++;
-            if (dataset == 50) {
-                break;
-            }
 
         }
     }
@@ -424,7 +399,6 @@ public:
         int bucket = HashIdInBucket(id);
         if (bucket >= n) {
             bucket = flipbit(bucket);
-            cout<<"flipbit occur! idbucket after flip bit: "<<bucket<<endl;
             }
         Readfile(IndexPagePtr,page);
         nextptr = 0;
