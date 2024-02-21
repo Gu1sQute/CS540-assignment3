@@ -11,14 +11,17 @@ using namespace std;
 #define BSIZE 4096
 #define hash(id) id % hashnum
 #define FreeSpacePos BSIZE - sizeof(int)
-#define NumEntriesPos BSIZE - (sizeof(int) + sizeof(int))
+#define NumEntriesPos FreeSpacePos - sizeof(int)
+#define OFPtrPos NumEntriesPos - sizeof(int)
+#define RecordIndexSize sizeof(int) * 2
 struct Pageindex {
     int numbucket;
     int pageptr;
     int indexptr;
-    char resvd[2];
-    bool fullbit;
-    bool oflpagebit;
+    char resvd[4];
+    // bool validbit;
+    // bool fullbit;
+    // bool oflpagebit;
 };
 class Record {
 public:
@@ -54,7 +57,6 @@ private:
     int i;	// The number of least-significant-bits of h(id) to check. Will need to increase i once n > 2^i
     int numRecords;    // Records currently in index. Used to test whether to increase n
     int nextFreeBlock; // Next place to write a bucket. Should increment it by BLOCK_SIZE whenever a bucket is written to EmployeeIndex
-    int numIndex;
     int nextptr;
     string fName;      // Name of index file
 
@@ -90,30 +92,37 @@ private:
 
     }
 
-    // Add index to index page AND add a blank page
-    Pageindex AddPage(int numbucket, int indexptr, bool overflow) {
+        // Add a blank page
+    int AddPage(int numbucket, int indexptr) {
         Pageindex newindex;
         memset(&newindex,0,sizeof(Pageindex));
-        if (overflow) {
-            newindex.oflpagebit = true;
-        }
         newindex.numbucket = numbucket;
         newindex.pageptr = nextFreeBlock;
         newindex.indexptr = indexptr;
         memcpy(&page[indexptr],&newindex,sizeof(Pageindex));
         Writefile(IndexPagePtr,page);
         vector<char> init(BLOCK_SIZE);
+        int of = -1;
+        memcpy(&init[OFPtrPos],&of,sizeof(int));
         Writefile(newindex.pageptr,init);
         init.clear();
         // Add n if it's another bucket, if n > 2^i, increase i
-        if (!overflow) {
-            n+=1;
-            if(n > static_cast<int>(pow(2,i))) {
-                i+=1;
-            }
+        n+=1;
+        if(n > static_cast<int>(pow(2,i))) {
+            i+=1;
         }
         nextFreeBlock += BLOCK_SIZE;
-        return newindex;
+        return newindex.pageptr;
+    }
+
+    // Add add a blank page legit
+    void AddOverflowPage(int pageptr) {
+        vector<char> init(BLOCK_SIZE);
+        int of = -1;
+        memcpy(&init[OFPtrPos],&of,sizeof(int));
+        Writefile(pageptr,init);
+        init.clear();
+        nextFreeBlock += BLOCK_SIZE;
         
     }
 
@@ -127,16 +136,20 @@ private:
     }
 
     // Write specific page
-    void WritePage(Record record, Pageindex& index) {
+    void WritePage(Record record, int pageptr) {
 
         vector<char> bucketpage(BLOCK_SIZE);
 
-        Readfile(index.pageptr, bucketpage);
+        Readfile(pageptr, bucketpage);
 
-        int writeptr = 0;
         int nextfree = *reinterpret_cast<int *>(&bucketpage[FreeSpacePos]);
-        int start_record_ptr = nextfree;
         int NumEntries = *reinterpret_cast<int *>(&bucketpage[NumEntriesPos]);
+        int OFPtr = *reinterpret_cast<int *>(&bucketpage[OFPtrPos]);
+
+
+
+        // Record original pointer to freespace, to calculate the record size
+        int start_record_ptr = nextfree;
         
         memcpy(&bucketpage[nextfree], &record.id, sizeof(record.id));
         nextfree += sizeof(record.id);
@@ -153,99 +166,169 @@ private:
         memcpy(&bucketpage[nextfree], &record.manager_id, sizeof(record.manager_id));
         nextfree += sizeof(record.manager_id);
 
-        NumEntries++;
-
-        if (NumEntries == RecordsperBuckets) {
-            index.fullbit = 1;
-        }
- 
 
         int recordsize = nextfree - start_record_ptr;
         int FreeSpacePtr = nextfree;
+
+        if((NumEntries >= RecordsperBuckets) || (nextfree >= OFPtrPos - NumEntries * RecordIndexSize)) {
+            if (OFPtr == -1) {
+                int Overflowpage = nextFreeBlock;
+                memcpy(&bucketpage[OFPtrPos],&Overflowpage,sizeof(Overflowpage));
+                Writefile(pageptr,bucketpage);
+                AddOverflowPage(Overflowpage);
+                WritePage(record, Overflowpage);
+                return ;
+            }
+            else {
+                bucketpage.clear();
+                WritePage(record,OFPtr);
+                return ;
+            }
+        }
+
+        NumEntries++;
         nextfree = FreeSpacePos;
         memcpy(&bucketpage[nextfree], &FreeSpacePtr, sizeof(FreeSpacePtr));
 
         nextfree = NumEntriesPos;
         memcpy(&bucketpage[nextfree], &NumEntries, sizeof(NumEntries));
 
-        nextfree = NumEntriesPos - NumEntries * sizeof(int) * 2;
+        nextfree = OFPtrPos - NumEntries * RecordIndexSize;
         memcpy(&bucketpage[nextfree], &start_record_ptr, sizeof(start_record_ptr));
 
         nextfree += sizeof(int);
         memcpy(&bucketpage[nextfree], &recordsize, sizeof(recordsize));
         
-        Writefile(index.pageptr,bucketpage);
+        Writefile(pageptr,bucketpage);
         bucketpage.clear();
 
     }
-    void ReinsertRecord(Record record) {
+    // Write specific page
+    int WritePageRehash(Record record, vector<char>& tmppage,int pageptr) {
+
+        int nextpagefree = *reinterpret_cast<int *>(&tmppage[FreeSpacePos]);
+        int NumEntries = *reinterpret_cast<int *>(&tmppage[NumEntriesPos]);
+        int OFPtr = *reinterpret_cast<int *>(&tmppage[OFPtrPos]);
+
+
+
+        // Record original pointer to freespace, to calculate the record size
+        int start_record_ptr = nextpagefree;
+        
+        memcpy(&tmppage[nextpagefree], &record.id, sizeof(record.id));
+        nextpagefree += sizeof(record.id);
+        tmppage[nextpagefree++] = ',';
+
+        memcpy(&tmppage[nextpagefree], record.name.data(), record.name.size());
+        nextpagefree += record.name.size();
+        tmppage[nextpagefree++] = ',';
+
+        memcpy(&tmppage[nextpagefree], record.bio.data(), record.bio.size());
+        nextpagefree += record.bio.size();
+        tmppage[nextpagefree++] = ',';
+
+        memcpy(&tmppage[nextpagefree], &record.manager_id, sizeof(record.manager_id));
+        nextpagefree += sizeof(record.manager_id);
+
+
+        int recordsize = nextpagefree - start_record_ptr;
+        int FreeSpacePtr = nextpagefree;
+
+        if((NumEntries >= RecordsperBuckets) || (nextpagefree >= OFPtrPos - NumEntries * RecordIndexSize)) {
+            int Overflowpage = nextFreeBlock;
+            memcpy(&tmppage[OFPtrPos],&Overflowpage,sizeof(Overflowpage));
+            Writefile(pageptr,tmppage);
+            AddOverflowPage(Overflowpage);
+            WritePage(record, Overflowpage);
+            return Overflowpage;
+        }
+
+        NumEntries++;
+        nextpagefree = FreeSpacePos;
+        memcpy(&tmppage[nextpagefree], &FreeSpacePtr, sizeof(FreeSpacePtr));
+
+        nextpagefree = NumEntriesPos;
+        memcpy(&tmppage[nextpagefree], &NumEntries, sizeof(NumEntries));
+
+        nextpagefree = OFPtrPos - NumEntries * RecordIndexSize;
+        memcpy(&tmppage[nextpagefree], &start_record_ptr, sizeof(start_record_ptr));
+
+        nextpagefree += sizeof(int);
+        memcpy(&tmppage[nextpagefree], &recordsize, sizeof(recordsize));
+        
+        Writefile(pageptr,tmppage);
+
+        return -1;
 
     }
+// Rehash only original bucket and new bucket
+    void Rehash(int PtrORG,int PtrNEW) {
+        
+        int OF = -1;
+        vector<string> defaultRecord = {"0","","","0"};
+        Record rehashrecord = defaultRecord;
+        int PtrA = PtrORG;
+        int PtrB = PtrNEW;
 
-    void Rehash(int numbucket) {
-        Pageindex index;
-        int checkrehashbucket = numbucket % static_cast<int>(pow(2,i-1));
-        int indexptr = 0;
-        vector<Pageindex> tmp;
-        vector<string> deflt = {"0","","","0"};
-        Record tmpRecord = deflt;
-        vector<Record> tempRecordDst;
-        vector<char> searchPage(BLOCK_SIZE);
-        int nextfree = 0;
-        int searchslotptr = 0;
-        // Search from index
-        for (int k = 0; k < numIndex; k++) {
-            memcpy(&index,&page[indexptr],sizeof(Pageindex));
-            int flp = flipbit(numbucket);
-            if (index.numbucket == flp) {
-                tmp.push_back(index);
-            }
-            indexptr+=sizeof(Pageindex);
-        }
-        for (auto index:tmp) {
-            Readfile(index.pageptr,searchPage);
-            int NumEntries = *reinterpret_cast<int *>(&searchPage[NumEntriesPos]);
-
-            if (NumEntries == 0) {
-                continue;
-            }
-
+        while (true) {
+            vector<char> nowPage(BLOCK_SIZE);
+            vector<char> tmpPageA(BLOCK_SIZE);
+            vector<char> tmpPageB(BLOCK_SIZE);
+            Readfile(PtrORG, nowPage);
+            int OFPtr = *reinterpret_cast<int *>(&nowPage[OFPtrPos]);
+            int NumEntries = *reinterpret_cast<int *>(&nowPage[NumEntriesPos]);
+            if (NumEntries ==0) {
+                nowPage.clear();
+                tmpPageA.clear();
+                tmpPageB.clear();
+                break; // No record in it, skip
+            };
+            memcpy(&tmpPageA[OFPtrPos], &OF, sizeof(int));
+            Writefile(PtrORG, tmpPageA);// Clean the original page
+            Readfile(PtrA,tmpPageA);
+            Readfile(PtrB,tmpPageB);
             for (int k = 1; k <= NumEntries; k++) {
-                searchslotptr = NumEntriesPos - sizeof(int) * 2 * k;
-                nextfree = *reinterpret_cast<int *>(&searchPage[searchslotptr]);
-                tmpRecord.id = *reinterpret_cast<int*>(&searchPage[nextfree]);
-                nextfree += sizeof(tmpRecord.id) + 1;
+                int start = *reinterpret_cast<int *>(&nowPage[OFPtrPos - RecordIndexSize * k]);
+                long long int recordid = (int)*reinterpret_cast<long long int *>(&nowPage[start]);
+                int bucketid = HashIdInBucket(recordid);
+                rehashrecord.id = recordid;
+                start += sizeof(rehashrecord.id) + 1;
                 string name;
-                while(searchPage[nextfree]!= ',') {
-                    name += searchPage[nextfree];
-                    nextfree++;
+                while(nowPage[start]!= ',') {
+                    name += nowPage[start];
+                    start++;
                 }
-                tmpRecord.name = name;
-                nextfree++;
+                rehashrecord.name = name;
+                start++;
                 string bio;
-                while(searchPage[nextfree]!= ',') {
-                    bio += searchPage[nextfree];
-                    nextfree++;
+                while(nowPage[start]!= ',') {
+                    bio += nowPage[start];
+                    start++;
                 }
-                tmpRecord.bio = bio;
-                nextfree++;
-                tmpRecord.manager_id = *reinterpret_cast<int*>(&searchPage[nextfree]);
-
-                tempRecordDst.push_back(tmpRecord);
-
+                rehashrecord.bio = bio;
+                start++;
+                rehashrecord.manager_id = *reinterpret_cast<long long int*>(&nowPage[start]);
+                if (bucketid != n - 1) {
+                    int OFA = WritePageRehash(rehashrecord, tmpPageA, PtrA);
+                    if(OFA != -1) {
+                        PtrA = OFA;
+                    }
+                }
+                else {
+                    int OFB = WritePageRehash(rehashrecord, tmpPageB, PtrB);
+                    if(OFB != -1) {
+                        PtrB = OFB;
+                    }
+                }
             }
-            numRecords -= NumEntries;
-            fill(searchPage.begin(),searchPage.end(),0);
-            Writefile(index.pageptr,searchPage);
-            index.fullbit = 0;
-            memcpy(&page[index.indexptr],&index,sizeof(Pageindex));
-            Writefile(IndexPagePtr,page);
-        }
-        searchPage.clear();
-        // now we reinsert the records
-        if(!tempRecordDst.empty()) {
-            for (auto& record:tempRecordDst) {
-                insertRecord(record);
+            nowPage.clear();
+            tmpPageA.clear();
+            tmpPageB.clear();
+            if (OFPtr == -1) {
+                break;
+            }
+            else {
+                PtrORG = OFPtr;
             }
         }
 
@@ -274,42 +357,35 @@ private:
         // Add record to the index in the correct block, creating a overflow block if necessary
         // First, find index from index page
         nextptr = 0;
-        for (int k = 0; k < numIndex; k++) {
+        for (int k = 0; k < n; k++) {
             memcpy(&Pindex,&page[nextptr],sizeof(Pageindex));
-            if (idbucket == Pindex.numbucket && !Pindex.fullbit) {
+            if (idbucket == Pindex.numbucket) {
                 // Write the record in file
-                WritePage(record,Pindex);
-                // Update index on indexpage (update for full)
-                memcpy(&page[nextptr],&Pindex,sizeof(Pageindex));
-                Writefile(IndexPagePtr,page);
-                bucketfound = true;
+                WritePage(record,Pindex.pageptr);
                 numRecords++;
                 break;
             }
             nextptr+=sizeof(Pageindex);
         }
-        int indexend = numIndex * sizeof(Pageindex);
+        int indexend = n * sizeof(Pageindex);
         
         // Take neccessary steps if capacity is reached:
 		// increase n; increase i (if necessary); place records in the new bucket that may have been originally misplaced due to a bit flip
-        // Overflow page if bucket is full for idbucket
-        if (!bucketfound) {
-            Pageindex newindex = AddPage(idbucket,indexend,true);
-            // Write the record in file
-            WritePage(record,newindex);
-            // Update index on indexpage
-            memcpy(&page[nextptr],&newindex,sizeof(Pageindex));
-            Writefile(IndexPagePtr,page);
-            indexend+=sizeof(Pageindex);
-            numIndex++;
-            numRecords++;
-        }
         if (CheckBucket()) {
-            Pageindex newindex = AddPage(n,indexend,false);
-            // First rehash then increase the numIndex
-            numIndex++;
-            Rehash(newindex.numbucket);
-            indexend+=sizeof(Pageindex);
+            int newpagptr = AddPage(n,indexend);
+            // Rehash
+            int orgbucketptr = -1;
+            nextptr = 0;
+            int orgnumbucket = (n-1) % static_cast<int>(pow(2,i-1));
+            while(orgbucketptr == -1) { // Find the old bucket to rehash
+                int num = *reinterpret_cast<int *>(&page[nextptr]);
+                if (num == orgnumbucket) {
+                    nextptr += sizeof(int);
+                    orgbucketptr = *reinterpret_cast<int *>(&page[nextptr]);
+                    Rehash(orgbucketptr,newpagptr);
+                }
+                nextptr += sizeof(Pageindex);
+            }
         }
         page.clear();
     }
@@ -318,7 +394,6 @@ public:
     LinearHashIndex(string indexFileName) {
         n = 4; // Start with 4 buckets in index
         i = 2; // Need 2 bits to address 4 buckets
-        numIndex = 0;
         numRecords = 0;
         nextFreeBlock = 0;
         fName = indexFileName;
@@ -348,7 +423,6 @@ public:
             Pindex.indexptr = nextptr;
             memcpy(&page[nextptr],&Pindex,sizeof(Pageindex));
             indexofbucket++;
-            numIndex++;
             nextptr+=sizeof(Pageindex);
         }
         fin.write(page.data(),BLOCK_SIZE);
@@ -357,6 +431,8 @@ public:
         // Now we create bucket page by page, just in initialization
         for (int k = 1; k <= n; k++) {
             fill(page.begin(),page.end(),0); // fill with 0
+            int of = -1;
+            memcpy(&page[OFPtrPos],&of,sizeof(int));
             nextFreeBlock += BLOCK_SIZE;
             fin.write(page.data(),BLOCK_SIZE);
         }
@@ -402,43 +478,49 @@ public:
             }
         Readfile(IndexPagePtr,page);
         nextptr = 0;
-        for (int k = 0; k < numIndex; k++) {
+        for (int k = 0; k < n; k++) {
             memcpy(&index,&page[nextptr],sizeof(Pageindex));
             if(index.numbucket == bucket) {
                 vector<char> searchPage(BLOCK_SIZE);
                 Readfile(index.pageptr,searchPage);
-                int NumEntries = *reinterpret_cast<int*>(&searchPage[NumEntriesPos]); // find how many entries in the page
-                for(int t = 1; t <= NumEntries; t++) {
-                    int searchslotptr = NumEntriesPos - sizeof(int) * 2 * t; // start index of every records
-                    int nextfree = *reinterpret_cast<int *>(&searchPage[searchslotptr]); // find where's records start
-                    long long int foundid = *reinterpret_cast<long long int*>(&searchPage[nextfree]);
-                    if (id == (int)foundid) {
-                        foundrecord.id = foundid;
-                        nextfree += sizeof(foundrecord.id) + 1;
-                        string name;
-                        while(searchPage[nextfree]!= ',') {
-                            name += searchPage[nextfree];
+                int ofptr = 0;
+                while(ofptr != -1) {
+                    ofptr = *reinterpret_cast<int *>(&searchPage[OFPtrPos]); // check if OF
+                    int NumEntries = *reinterpret_cast<int*>(&searchPage[NumEntriesPos]); // find how many entries in the page
+                    for(int t = 1; t <= NumEntries; t++) {
+                        int searchslotptr = OFPtrPos - RecordIndexSize * t; // start index of every records
+                        int nextfree = *reinterpret_cast<int *>(&searchPage[searchslotptr]); // find where's records start
+                        long long int foundid = *reinterpret_cast<long long int*>(&searchPage[nextfree]);
+                        if (id == (int)foundid) {
+                            foundrecord.id = foundid;
+                            nextfree += sizeof(foundrecord.id) + 1;
+                            string name;
+                            while(searchPage[nextfree]!= ',') {
+                                name += searchPage[nextfree];
+                                nextfree++;
+                            }
+                            foundrecord.name = name;
                             nextfree++;
-                        }
-                        foundrecord.name = name;
-                        nextfree++;
-                        string bio;
-                        while(searchPage[nextfree]!= ',') {
-                            bio += searchPage[nextfree];
+                            string bio;
+                            while(searchPage[nextfree]!= ',') {
+                                bio += searchPage[nextfree];
+                                nextfree++;
+                            }
+                            foundrecord.bio = bio;
                             nextfree++;
+                            foundrecord.manager_id = *reinterpret_cast<long long int*>(&searchPage[nextfree]);
+                            cout<<"ID found!"<<endl;
+                            foundrecord.print();
+                            return foundrecord;
                         }
-                        foundrecord.bio = bio;
-                        nextfree++;
-                        foundrecord.manager_id = *reinterpret_cast<long long int*>(&searchPage[nextfree]);
-                        cout<<"ID found!"<<endl;
-                        foundrecord.print();
-                        return foundrecord;
                     }
+                Readfile(ofptr,searchPage);
                 }
             }
             nextptr += sizeof(Pageindex);
         }
         cout<<"BAD ID!"<<endl;
+        foundrecord.id = id;
         foundrecord.print();
         return foundrecord;
     }
